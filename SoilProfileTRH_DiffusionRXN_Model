@@ -1,17 +1,19 @@
-## Model v2.2 Notes ##
-## added piece to account for plateau that has two sections rather than one. This occurs in LH2 ##
+## please reference readMe file prior to running this code ##
+## Designed by Donald Glaser ##
+## Please cite Glaser et al. 2021. Astrobiology. DOI: ##
 
 library(ggplot2)
 library(plyr)
 
-## PARAMETERS ## ## Before you start, double check these parameters ##
-inpFile <- "MDQ2_ProfileMeans_201006.csv"
-site <- "MDQ2"
-siteFull <- "Mar de Quartz"
+## PARAMETERS ##
+## Before you start, double check these parameters ##
+inpFile <- ## input file name here ##
+site <- ## Abbreviated site name ##
+siteFull <- ## full site name ##
 thRsq <- 0.9
 thRXN <- 0.1
-Por <- 0.516
-mVer <- 2.2
+Por <- ## soil porosity ##
+mVer <- 2.3 ## model version ##
 
 inp <- read.csv2(file = inpFile, header=TRUE, sep=",", stringsAsFactors = FALSE)
 inp$Date_Time <- as.POSIXct(inp$Date_Time, format = "%Y-%m-%d %H:%M:%S")
@@ -21,6 +23,10 @@ for(i in 2:12) {
 
 maxOBS <- max(inp$OBS)
 allData <- data.frame()
+
+## Begin section 1 ##
+## first step to identify profile shapes (H2O minima(adsorbing), H2O maxima(desorbing), or none) ##
+## calculates the AH v depth slope between i) surface and 2.5cm (LSlp1_2) and ii) 2.5cm and 30cm (LSlp2_6)
 
 for(i in 1:maxOBS) {
   sub <- data.frame()
@@ -45,11 +51,17 @@ for(i in 1:maxOBS) {
 allData$time <- as.POSIXct(allData$time, origin = "1970-01-01")
 row.names(allData) <- c(1:maxOBS)
 
+## End section 1 ##
+
+## Begin section 2 ##
+## Finish identifying profiles with adsorbing or desorbing shape ##
+## Identify which lower point to use as boundry for regression (no flux boundry)##
+## Calculate two-part linear approximation of upper and lower profiles and depth of reaction point ##
 
 AdsID <- data.frame()
 AdsID[1,1] <- "NA"
-for(i in 2:maxOBS) { ## Identify profiles with adsorbing or desorbing shape ## Also identify which lower point to use as boundry for regression ##
-  temp <- data.frame() ## Need to work on this loop to more accurately identify adsorbing and desorbing profiles ##
+for(i in 2:maxOBS) {
+  temp <- data.frame()
   LSlp1_2 <- allData$LSlp1_2[i]
   maxDep <- allData$maxDep[i]
   minDep <- allData$minDep[i]
@@ -354,6 +366,134 @@ colnames(profiles) <- c("UpperAHSlope", "UpperAHIntercept", "UpperAHRSq", "Upper
 allData <- cbind(allData, profiles)
 names(allData)[names(allData) == "i"] <- "OBS"
 
+## End section 2 ##
+
+## Begin section 3 ##
+## this section i) labels diurnal cycle, ii) calculates upper and lower flux, iii) calculates net flux (at reaction point), ##
+## iv) calculates reaction and WVA flux, and v) cumulative WVA over diurnal cycle ##
+
+modOut <- matrix()
+WVAFlg <- 0
+for(i in 1:(maxOBS - 1)) { ## This loop labels the diurnal cycle ##
+  if(allData$Flg1[i] %in% "Des" & allData$Flg1[i+1] %in% "NA") {
+    modOut[i] <- WVAFlg
+    WVAFlg <- WVAFlg + 1
+  }
+  else {
+    modOut[i] <- WVAFlg
+  }
+}
+modOut[maxOBS] <- WVAFlg
+porTab <- matrix()
+porTab[1:maxOBS] <- Por
+
+DJTab <- data.frame()
+SCoeff <- ((Por - 0.1)/0.9)^2
+for(i in 1:maxOBS) {
+  if(allData$Flg1[i] %in% "NA" | i == maxOBS) {
+    temp <- cbind("NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA")
+    colnames(temp) <- c("D.up", "D.lo", "J.up", "J.lo", "NetJ", "RXN", "WVAFlux", "WVA")
+    DJTab <- rbind(DJTab, temp)
+  }
+  else {
+    temp <- data.frame()
+    T.up <- as.numeric(allData$T.up[i]) + 273.15
+    T.lo <- as.numeric(allData$T.lo[i]) + 273.15
+    delAH.up <- as.numeric(allData$UpperAHSlope[i]) / 1000
+    delAH.lo <- as.numeric(allData$LowerAHSlope[i]) / 1000
+    delTime <- allData$time[i+1] - allData$time[i]
+    delTime <- as.numeric(delTime) * 60
+    D.up <- (T.up/273)^1.75
+    D.up <- 0.073 * SCoeff * D.up
+    D.lo <- (T.lo/273)^1.75
+    D.lo <- 0.073 * SCoeff * D.lo
+    J.up <- D.up * delAH.up
+    J.lo <- D.lo * delAH.lo
+    NetJ <- (-1 * J.lo) - J.up
+    RXN <- -1 * NetJ
+    WVAFlux <- NetJ
+    WVA <- WVAFlux * delTime
+    temp <- cbind(D.up, D.lo, J.up, J.lo, NetJ, RXN, WVAFlux, WVA)
+    colnames(temp) <- c("D.up", "D.lo", "J.up", "J.lo", "NetJ", "RXN", "WVAFlux", "WVA")
+    DJTab <- rbind(DJTab, temp)
+  }
+}
+allData <- cbind(allData, porTab, modOut, DJTab)
+
+cumlTab <- data.frame()
+dayWVA <- 0
+cumlWVA <- 0
+
+for(i in 2:(maxOBS - 1)) {
+  dayID <- as.numeric(allData$modOut[i])
+  dayID.lo <- as.numeric(allData$modOut[i-1])
+  dayID.up <- as.numeric(allData$modOut[i+1])
+  Flg1 <- allData$Flg1[i]
+  tWVA <- as.numeric(allData$WVA[i])
+  tNetJ <- as.numeric(allData$NetJ[i])
+  if(dayID == 0) {
+    dayWVA <- dayWVA
+    cumlWVA <- cumlWVA
+    temp <- cbind(dayWVA, cumlWVA)
+    cumlTab <- rbind(cumlTab, temp)
+  } else if(dayID > dayID.lo){
+    dayWVA <- 0
+    if(Flg1 %in% "Ads" & tNetJ > 0) {
+        dayWVA <- tWVA
+        cumlWVA <- cumlWVA + tWVA
+        temp <- cbind(dayWVA, cumlWVA)
+        cumlTab <- rbind(cumlTab, temp)
+    } else {
+        cumlWVA <- cumlWVA
+        temp <- cbind(dayWVA, cumlWVA)
+        cumlTab <- rbind(cumlTab, temp)
+    }
+  } else {
+      if((Flg1 %in% "Ads") & (tNetJ > 0)) {
+        dayWVA <- (tWVA + dayWVA)
+        cumlWVA <- (cumlWVA + tWVA)
+        temp <- cbind(dayWVA, cumlWVA)
+        cumlTab <- rbind(cumlTab, temp)
+      } else if((Flg1 %in% "Des") & (tNetJ < 0)) {
+        dayWVA <- (tWVA + dayWVA)
+        cumlWVA <- (cumlWVA + tWVA)
+        temp <- cbind(dayWVA, cumlWVA)
+        cumlTab <- rbind(cumlTab, temp)
+      } else {
+        dayWVA <- dayWVA
+        cumlWVA <- cumlWVA
+        temp <- cbind(dayWVA, cumlWVA)
+        cumlTab <- rbind(cumlTab, temp)
+      }
+  }
+}
+
+yr <- format(Sys.time(), "%y")
+mn <- format(Sys.time(), "%m")
+dy <- format(Sys.time(), "%d")
+nmStr <- paste0(site, "_ProfileProperties_", yr, mn, dy, ".csv")
+nmStr2 <- paste0(site, "_ProfileProperties_", yr, mn, dy, ".Rda")
+
+cumlTab <- rbind(c(0,0), cumlTab)
+cumlLen <- nrow(cumlTab)
+cumlTab <- rbind(cumlTab, c(cumlTab[cumlLen,1], cumlTab[cumlLen,2]))
+allData <- cbind(allData, cumlTab)
+save(allData, nmStr2)
+
+lab <- data.frame()
+lab[1:maxOBS,1] <- ""
+lab[1:6,1] <- c("Rsq Threshold", thRsq, "Porosity", Por, "Model Version", mVer)
+colnames(lab) <- "Parameters"
+allData <- cbind(lab, allData)
+
+write.csv(allData, nmStr, row.names = FALSE)
+
+## End section 3 ##
+
+## Begin section 4 ##
+## Plot the AH v depth profiles with and without the modeled linear approximations and T v depth profiles ##
+## this section is optional ##
+
 maxAH <- max(inp$MeanAH)
 maxAH <- round_any(maxAH,100)
 maxT <- max(inp$MeanT)
@@ -365,10 +505,7 @@ dir.create("AH_Plots")
 dir.create("T_Reg_Plots")
 dir.create("T_Plots")
 
-## Everything works up to here, I think ##
-
-
-for(i in 1:maxOBS) { ## plot profiles ## To skip plotting: comment this loop out ##
+for(i in 1:maxOBS) { 
   sub <- subset(inp, OBS == i)
   sub2 <- subset(allData, OBS == i)
   temp <- data.frame()
@@ -508,117 +645,4 @@ for(i in 1:maxOBS) { ## plot profiles ## To skip plotting: comment this loop out
 
 }
 
-modOut <- matrix()
-WVAFlg <- 0
-for(i in 1:(maxOBS - 1)) { ## This loop labels the diurnal cycle ##
-  if(allData$Flg1[i] %in% "Des" & allData$Flg1[i+1] %in% "NA") {
-    modOut[i] <- WVAFlg
-    WVAFlg <- WVAFlg + 1
-  }
-  else {
-    modOut[i] <- WVAFlg
-  }
-}
-modOut[maxOBS] <- WVAFlg
-porTab <- matrix()
-porTab[1:maxOBS] <- Por
-
-DJTab <- data.frame()
-SCoeff <- ((Por - 0.1)/0.9)^2
-for(i in 1:maxOBS) {
-  if(allData$Flg1[i] %in% "NA" | i == maxOBS) {
-    temp <- cbind("NA", "NA", "NA", "NA", "NA", "NA", "NA", "NA")
-    colnames(temp) <- c("D.up", "D.lo", "J.up", "J.lo", "NetJ", "RXN", "WVAFlux", "WVA")
-    DJTab <- rbind(DJTab, temp)
-  }
-  else {
-    temp <- data.frame()
-    T.up <- as.numeric(allData$T.up[i]) + 273.15
-    T.lo <- as.numeric(allData$T.lo[i]) + 273.15
-    delAH.up <- as.numeric(allData$UpperAHSlope[i]) / 1000
-    delAH.lo <- as.numeric(allData$LowerAHSlope[i]) / 1000
-    delTime <- allData$time[i+1] - allData$time[i]
-    delTime <- as.numeric(delTime) * 60
-    D.up <- (T.up/273)^1.75
-    D.up <- 0.073 * SCoeff * D.up
-    D.lo <- (T.lo/273)^1.75
-    D.lo <- 0.073 * SCoeff * D.lo
-    J.up <- D.up * delAH.up
-    J.lo <- D.lo * delAH.lo
-    NetJ <- (-1 * J.lo) - J.up
-    RXN <- -1 * NetJ
-    WVAFlux <- NetJ
-    WVA <- WVAFlux * delTime
-    temp <- cbind(D.up, D.lo, J.up, J.lo, NetJ, RXN, WVAFlux, WVA)
-    colnames(temp) <- c("D.up", "D.lo", "J.up", "J.lo", "NetJ", "RXN", "WVAFlux", "WVA")
-    DJTab <- rbind(DJTab, temp)
-  }
-}
-
-allData <- cbind(allData, porTab, modOut, DJTab)
-
-
-cumlTab <- data.frame()
-dayWVA <- 0
-cumlWVA <- 0
-
-for(i in 2:(maxOBS - 1)) { ### I think this works, but I need to work on the DJTab loop ##
-  dayID <- as.numeric(allData$modOut[i])
-  dayID.lo <- as.numeric(allData$modOut[i-1])
-  dayID.up <- as.numeric(allData$modOut[i+1])
-  Flg1 <- allData$Flg1[i]
-  tWVA <- as.numeric(allData$WVA[i])
-  tNetJ <- as.numeric(allData$NetJ[i])
-  if(dayID == 0) {
-    dayWVA <- dayWVA
-    cumlWVA <- cumlWVA
-    temp <- cbind(dayWVA, cumlWVA)
-    cumlTab <- rbind(cumlTab, temp)
-  } else if(dayID > dayID.lo){
-    dayWVA <- 0
-    if(Flg1 %in% "Ads" & tNetJ > 0) {
-        dayWVA <- tWVA
-        cumlWVA <- cumlWVA + tWVA
-        temp <- cbind(dayWVA, cumlWVA)
-        cumlTab <- rbind(cumlTab, temp)
-    } else {
-        cumlWVA <- cumlWVA
-        temp <- cbind(dayWVA, cumlWVA)
-        cumlTab <- rbind(cumlTab, temp)
-    }
-  } else {
-      if((Flg1 %in% "Ads") & (tNetJ > 0)) {
-        dayWVA <- (tWVA + dayWVA)
-        cumlWVA <- (cumlWVA + tWVA)
-        temp <- cbind(dayWVA, cumlWVA)
-        cumlTab <- rbind(cumlTab, temp)
-      } else if((Flg1 %in% "Des") & (tNetJ < 0)) {
-        dayWVA <- (tWVA + dayWVA)
-        cumlWVA <- (cumlWVA + tWVA)
-        temp <- cbind(dayWVA, cumlWVA)
-        cumlTab <- rbind(cumlTab, temp)
-      } else {
-        dayWVA <- dayWVA
-        cumlWVA <- cumlWVA
-        temp <- cbind(dayWVA, cumlWVA)
-        cumlTab <- rbind(cumlTab, temp)
-      }
-  }
-}
-
-cumlTab <- rbind(c(0,0), cumlTab)
-cumlLen <- nrow(cumlTab)
-cumlTab <- rbind(cumlTab, c(cumlTab[cumlLen,1], cumlTab[cumlLen,2]))
-allData <- cbind(allData, cumlTab)
-lab <- data.frame()
-lab[1:maxOBS,1] <- ""
-lab[1:6,1] <- c("Rsq Threshold", thRsq, "Porosity", Por, "Model Version", mVer)
-colnames(lab) <- "Parameters"
-allData <- cbind(lab, allData)
-
-yr <- format(Sys.time(), "%y")
-mn <- format(Sys.time(), "%m")
-dy <- format(Sys.time(), "%d")
-nmStr <- paste0(site, "_ProfileProperties_", yr, mn, dy, ".csv")
-
-write.csv(allData, nmStr, row.names = FALSE)
+## End section 4 ##
